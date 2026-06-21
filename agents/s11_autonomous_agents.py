@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Harness: autonomy -- models that find work without being told.
+# Harness 层: 自治 -- 模型自己找活干, 无需指派。
 """
 s11_autonomous_agents.py - Autonomous Agents
 
@@ -123,25 +124,27 @@ class MessageBus:
 BUS = MessageBus(INBOX_DIR)
 
 
-# -- Task board scanning --
+# -- Task board scanning -- 任务板扫描
 def scan_unclaimed_tasks() -> list:
     TASKS_DIR.mkdir(exist_ok=True)
     unclaimed = []
     for f in sorted(TASKS_DIR.glob("task_*.json")):
         task = json.loads(f.read_text())
-        if (task.get("status") == "pending"
-                and not task.get("owner")
-                and not task.get("blockedBy")):
+        # 三个状态均满足时, 任务可领取
+        if (task.get("status") == "pending"     # 在“等待”
+                and not task.get("owner")       # 无负责人
+                and not task.get("blockedBy")): # 无被阻塞
             unclaimed.append(task)
     return unclaimed
 
 
 def claim_task(task_id: int, owner: str) -> str:
-    with _claim_lock:
+    with _claim_lock:   # 加锁, 防止多个线程同时操作
         path = TASKS_DIR / f"task_{task_id}.json"
         if not path.exists():
             return f"Error: Task {task_id} not found"
         task = json.loads(path.read_text())
+        # 三重检查
         if task.get("owner"):
             existing_owner = task.get("owner") or "someone else"
             return f"Error: Task {task_id} has already been claimed by {existing_owner}"
@@ -150,13 +153,14 @@ def claim_task(task_id: int, owner: str) -> str:
             return f"Error: Task {task_id} cannot be claimed because its status is '{status}'"
         if task.get("blockedBy"):
             return f"Error: Task {task_id} is blocked by other task(s) and cannot be claimed yet"
+        # 认领任务
         task["owner"] = owner
         task["status"] = "in_progress"
         path.write_text(json.dumps(task, indent=2))
     return f"Claimed task #{task_id} for {owner}"
 
 
-# -- Identity re-injection after compression --
+# -- Identity re-injection after compression -- 身份重注入
 def make_identity_block(name: str, role: str, team_name: str) -> dict:
     return {
         "role": "user",
@@ -262,14 +266,15 @@ class TeammateManager:
                         })
                 messages.append({"role": "user", "content": results})
                 if idle_requested:
-                    break
+                    break       # 模型表示没有工作了，则退出工作循环
 
             # -- IDLE PHASE: poll for inbox messages and unclaimed tasks --
             self._set_status(name, "idle")
             resume = False
-            polls = IDLE_TIMEOUT // max(POLL_INTERVAL, 1)
+            polls = IDLE_TIMEOUT // max(POLL_INTERVAL, 1)   # 进行POLL_INTERVAL次轮询
             for _ in range(polls):
                 time.sleep(POLL_INTERVAL)
+                # 检查邮箱
                 inbox = BUS.read_inbox(name)
                 if inbox:
                     for msg in inbox:
@@ -279,16 +284,19 @@ class TeammateManager:
                         messages.append({"role": "user", "content": json.dumps(msg)})
                     resume = True
                     break
+                # 扫描任务面板
                 unclaimed = scan_unclaimed_tasks()
                 if unclaimed:
                     task = unclaimed[0]
-                    result = claim_task(task["id"], name)
+                    result = claim_task(task["id"], name)   # 取任务
                     if result.startswith("Error:"):
                         continue
+                    # 任务被成功领取，开始构建提示
                     task_prompt = (
                         f"<auto-claimed>Task #{task['id']}: {task['subject']}\n"
                         f"{task.get('description', '')}</auto-claimed>"
                     )
+                    # 上下文过短 (说明发生了压缩) 时, 在开头插入身份块
                     if len(messages) <= 3:
                         messages.insert(0, make_identity_block(name, role, team_name))
                         messages.insert(1, {"role": "assistant", "content": f"I am {name}. Continuing."})
@@ -297,10 +305,10 @@ class TeammateManager:
                     resume = True
                     break
 
-            if not resume:
+            if not resume:   # 没有新消息和任务，则退出
                 self._set_status(name, "shutdown")
                 return
-            self._set_status(name, "working")
+            self._set_status(name, "working")   # 找到任务回WORK状态
 
     def _exec(self, sender: str, tool_name: str, args: dict) -> str:
         # these base tools are unchanged from s02
@@ -568,6 +576,7 @@ if __name__ == "__main__":
         if query.strip() == "/inbox":
             print(json.dumps(BUS.read_inbox("lead"), indent=2))
             continue
+        # 查看任务面板状态
         if query.strip() == "/tasks":
             TASKS_DIR.mkdir(exist_ok=True)
             for f in sorted(TASKS_DIR.glob("task_*.json")):

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Harness: background execution -- the model thinks while the harness waits.
+# Harness 层: 后台执行 -- 模型继续思考, harness 负责等待
 """
 s08_background_tasks.py - Background Tasks
 
@@ -49,16 +50,19 @@ SYSTEM = f"You are a coding agent at {WORKDIR}. Use background_run for long-runn
 # -- BackgroundManager: threaded execution + notification queue --
 class BackgroundManager:
     def __init__(self):
-        self.tasks = {}  # task_id -> {status, result, command}
-        self._notification_queue = []  # completed task results
-        self._lock = threading.Lock()
+        self.tasks = {}  # task_id -> {status, result, command} 持久状态表
+        self._notification_queue = []  # completed task results 已完成任务通知队列（临时）
+        self._lock = threading.Lock()   # 线程锁（保护通知队列）
 
     def run(self, command: str) -> str:
         """Start a background thread, return task_id immediately."""
-        task_id = str(uuid.uuid4())[:8]
+        task_id = str(uuid.uuid4())[:8]     # 生成8位随机字符串作为任务ID
         self.tasks[task_id] = {"status": "running", "result": None, "command": command}
+        # 创建线程
         thread = threading.Thread(
-            target=self._execute, args=(task_id, command), daemon=True
+            target=self._execute,   # 线程目标函数
+            args=(task_id, command), 
+            daemon=True           # 守护线程
         )
         thread.start()
         return f"Background task {task_id} started: {command[:80]}"
@@ -78,9 +82,10 @@ class BackgroundManager:
         except Exception as e:
             output = f"Error: {e}"
             status = "error"
+        # 更新任务状态
         self.tasks[task_id]["status"] = status
         self.tasks[task_id]["result"] = output or "(no output)"
-        with self._lock:
+        with self._lock:            # 将任务结果加入通知队列
             self._notification_queue.append({
                 "task_id": task_id,
                 "status": status,
@@ -88,6 +93,7 @@ class BackgroundManager:
                 "result": (output or "(no output)")[:500],
             })
 
+    # 查询单任务或列出所有
     def check(self, task_id: str = None) -> str:
         """Check status of one task or list all."""
         if task_id:
@@ -102,9 +108,9 @@ class BackgroundManager:
 
     def drain_notifications(self) -> list:
         """Return and clear all pending completion notifications."""
-        with self._lock:
-            notifs = list(self._notification_queue)
-            self._notification_queue.clear()
+        with self._lock:    # 加锁
+            notifs = list(self._notification_queue) # 复制当前队列
+            self._notification_queue.clear()    # 清空
         return notifs
 
 
@@ -188,13 +194,15 @@ TOOLS = [
 def agent_loop(messages: list):
     while True:
         # Drain background notifications and inject as system message before LLM call
+        # 每次 LLM 调用前，检查有没有后台任务完成
         notifs = BG.drain_notifications()
         if notifs and messages:
             notif_text = "\n".join(
                 f"[bg:{n['task_id']}] {n['status']}: {n['result']}" for n in notifs
             )
             messages.append({"role": "user", "content": f"<background-results>\n{notif_text}\n</background-results>"})
-        response = client.messages.create(
+        
+        response = client.meSssages.create(
             model=MODEL, system=SYSTEM, messages=messages,
             tools=TOOLS, max_tokens=8000,
         )

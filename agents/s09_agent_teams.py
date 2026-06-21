@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Harness: team mailboxes -- multiple models, coordinated through files.
+# Harness 层: 团队邮箱 -- 多个模型, 通过文件协调。
 """
 s09_agent_teams.py - Agent Teams
 
@@ -66,11 +67,11 @@ INBOX_DIR = TEAM_DIR / "inbox"
 SYSTEM = f"You are a team lead at {WORKDIR}. Spawn teammates and communicate via inboxes."
 
 VALID_MSG_TYPES = {
-    "message",
-    "broadcast",
-    "shutdown_request",
-    "shutdown_response",
-    "plan_approval_response",
+    "message",                  # 普通消息
+    "broadcast",                # 广播消息
+    "shutdown_request",         # 请求关闭
+    "shutdown_response",        # 响应关闭请求
+    "plan_approval_response",    # 计划批准响应
 }
 
 
@@ -80,6 +81,7 @@ class MessageBus:
         self.dir = inbox_dir
         self.dir.mkdir(parents=True, exist_ok=True)
 
+    # 发消息，追加写入
     def send(self, sender: str, to: str, content: str,
              msg_type: str = "message", extra: dict = None) -> str:
         if msg_type not in VALID_MSG_TYPES:
@@ -93,10 +95,11 @@ class MessageBus:
         if extra:
             msg.update(extra)
         inbox_path = self.dir / f"{to}.jsonl"
-        with open(inbox_path, "a") as f:
+        with open(inbox_path, "a") as f:        # "a" = append，追加模式
             f.write(json.dumps(msg) + "\n")
         return f"Sent {msg_type} to {to}"
 
+    # 读取消息，清空文件
     def read_inbox(self, name: str) -> list:
         inbox_path = self.dir / f"{name}.jsonl"
         if not inbox_path.exists():
@@ -105,12 +108,13 @@ class MessageBus:
         for line in inbox_path.read_text().strip().splitlines():
             if line:
                 messages.append(json.loads(line))
-        inbox_path.write_text("")
+        inbox_path.write_text("")            # 清空文件
         return messages
 
     def broadcast(self, sender: str, content: str, teammates: list) -> str:
         count = 0
         for name in teammates:
+            # 广播，但是不发给自己
             if name != sender:
                 self.send(sender, name, content, "broadcast")
                 count += 1
@@ -120,12 +124,12 @@ class MessageBus:
 BUS = MessageBus(INBOX_DIR)
 
 
-# -- TeammateManager: persistent named agents with config.json --
+# -- TeammateManager: persistent named agents with config.json --队友生命周期管理
 class TeammateManager:
     def __init__(self, team_dir: Path):
         self.dir = team_dir
         self.dir.mkdir(exist_ok=True)
-        self.config_path = self.dir / "config.json"
+        self.config_path = self.dir / "config.json" # 通过 config.json 维护团队名册
         self.config = self._load_config()
         self.threads = {}
 
@@ -143,17 +147,21 @@ class TeammateManager:
                 return m
         return None
 
+    # 生成队友
     def spawn(self, name: str, role: str, prompt: str) -> str:
         member = self._find_member(name)
+        # 已存在，检索
         if member:
             if member["status"] not in ("idle", "shutdown"):
                 return f"Error: '{name}' is currently {member['status']}"
             member["status"] = "working"
             member["role"] = role
+        # 否则创建
         else:
             member = {"name": name, "role": role, "status": "working"}
             self.config["members"].append(member)
         self._save_config()
+        # 启动后台线程
         thread = threading.Thread(
             target=self._teammate_loop,
             args=(name, role, prompt),
@@ -163,18 +171,21 @@ class TeammateManager:
         thread.start()
         return f"Spawned '{name}' (role: {role})"
 
+    # 每个队友在每次 LLM 调用前检查收件箱, 将消息注入上下文 → 队友的agent_loop
     def _teammate_loop(self, name: str, role: str, prompt: str):
         sys_prompt = (
             f"You are '{name}', role: {role}, at {WORKDIR}. "
             f"Use send_message to communicate. Complete your task."
         )
-        messages = [{"role": "user", "content": prompt}]
+        messages = [{"role": "user", "content": prompt}]    # 各队友从自己的prompt开始
         tools = self._teammate_tools()
         for _ in range(50):
+            # 检查邮箱 —— 队友"接收指令"的方式
             inbox = BUS.read_inbox(name)
             for msg in inbox:
                 messages.append({"role": "user", "content": json.dumps(msg)})
             try:
+                # 调用 LLM
                 response = client.messages.create(
                     model=MODEL,
                     system=sys_prompt,
@@ -200,9 +211,10 @@ class TeammateManager:
             messages.append({"role": "user", "content": results})
         member = self._find_member(name)
         if member and member["status"] != "shutdown":
-            member["status"] = "idle"
+            member["status"] = "idle"       # 队友任务完成，标记idle
             self._save_config()
 
+    # 队友可使用的工具
     def _exec(self, sender: str, tool_name: str, args: dict) -> str:
         # these base tools are unchanged from s02
         if tool_name == "bash":
@@ -342,8 +354,10 @@ TOOLS = [
 ]
 
 
+# Lead 的 agent_loop
 def agent_loop(messages: list):
     while True:
+        # 检查邮箱
         inbox = BUS.read_inbox("lead")
         if inbox:
             messages.append({
@@ -387,9 +401,11 @@ if __name__ == "__main__":
             break
         if query.strip().lower() in ("q", "exit", ""):
             break
+        # 查看团队状态
         if query.strip() == "/team":
             print(TEAM.list_all())
             continue
+        # 查看邮箱
         if query.strip() == "/inbox":
             print(json.dumps(BUS.read_inbox("lead"), indent=2))
             continue

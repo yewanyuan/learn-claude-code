@@ -31,16 +31,17 @@ load_dotenv(override=True)
 if os.getenv("ANTHROPIC_BASE_URL"):
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
-WORKDIR = Path.cwd()
+WORKDIR = Path.cwd()    # Path 替代 os.getcwd()
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use tools to solve tasks. Act, don't explain."
 
 
+# 路径安全沙箱，所有文件操作工具都经过这个函数，bash 除外
 def safe_path(p: str) -> Path:
-    path = (WORKDIR / p).resolve()
-    if not path.is_relative_to(WORKDIR):
+    path = (WORKDIR / p).resolve()  # 拼接并解析为绝对路径
+    if not path.is_relative_to(WORKDIR):    # 检查是否在 WORKDIR 子目录下
         raise ValueError(f"Path escapes workspace: {p}")
     return path
 
@@ -63,9 +64,9 @@ def run_read(path: str, limit: int = None) -> str:
     try:
         text = safe_path(path).read_text()
         lines = text.splitlines()
-        if limit and limit < len(lines):
+        if limit and limit < len(lines):    # 支持只读前 N 行
             lines = lines[:limit] + [f"... ({len(lines) - limit} more lines)"]
-        return "\n".join(lines)[:50000]
+        return "\n".join(lines)[:50000] # 截断保护
     except Exception as e:
         return f"Error: {e}"
 
@@ -73,7 +74,7 @@ def run_read(path: str, limit: int = None) -> str:
 def run_write(path: str, content: str) -> str:
     try:
         fp = safe_path(path)
-        fp.parent.mkdir(parents=True, exist_ok=True)
+        fp.parent.mkdir(parents=True, exist_ok=True)    # 自动创建父目录
         fp.write_text(content)
         return f"Wrote {len(content)} bytes to {path}"
     except Exception as e:
@@ -86,13 +87,13 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
         content = fp.read_text()
         if old_text not in content:
             return f"Error: Text not found in {path}"
-        fp.write_text(content.replace(old_text, new_text, 1))
+        fp.write_text(content.replace(old_text, new_text, 1))   # 只替换第一个匹配项
         return f"Edited {path}"
     except Exception as e:
         return f"Error: {e}"
 
 
-# -- The dispatch map: {tool_name: handler} --
+# -- The dispatch map: {tool_name: handler} -- 工具名 → 函数的映射表
 TOOL_HANDLERS = {
     "bash":       lambda **kw: run_bash(kw["command"]),
     "read_file":  lambda **kw: run_read(kw["path"], kw.get("limit")),
@@ -124,7 +125,8 @@ def agent_loop(messages: list):
         results = []
         for block in response.content:
             if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
+                handler = TOOL_HANDLERS.get(block.name) # 获取工具名对应的处理函数
+                # 调用
                 output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
                 print(f"> {block.name}:")
                 print(output[:200])

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Harness: compression -- clean memory for infinite sessions.
+# Harness 层: 压缩 -- 干净的记忆, 无限的会话
 """
 s06_context_compact.py - Compact
 
@@ -54,10 +55,10 @@ MODEL = os.environ["MODEL_ID"]
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use tools to solve tasks."
 
-THRESHOLD = 50000
-TRANSCRIPT_DIR = WORKDIR / ".transcripts"
-KEEP_RECENT = 3
-PRESERVE_RESULT_TOOLS = {"read_file"}
+THRESHOLD = 50000   # tokens阈值估算
+TRANSCRIPT_DIR = WORKDIR / ".transcripts"   # 保存完整记录的目录
+KEEP_RECENT = 3 # 保留最近n次的记录工具结果
+PRESERVE_RESULT_TOOLS = {"read_file"}   # 哪些工具不压缩
 
 
 def estimate_tokens(messages: list) -> int:
@@ -67,14 +68,14 @@ def estimate_tokens(messages: list) -> int:
 
 # -- Layer 1: micro_compact - replace old tool results with placeholders --
 def micro_compact(messages: list) -> list:
-    # Collect (msg_index, part_index, tool_result_dict) for all tool_result entries
+    # Collect (msg_index, part_index, tool_result_dict) for all tool_result entries 找到所有 tool_result 的位置
     tool_results = []
     for msg_idx, msg in enumerate(messages):
         if msg["role"] == "user" and isinstance(msg.get("content"), list):
             for part_idx, part in enumerate(msg["content"]):
                 if isinstance(part, dict) and part.get("type") == "tool_result":
                     tool_results.append((msg_idx, part_idx, part))
-    if len(tool_results) <= KEEP_RECENT:
+    if len(tool_results) <= KEEP_RECENT:    # 如果工具结果数量小于等于KEEP_RECENT, 则不压缩
         return messages
     # Find tool_name for each result by matching tool_use_id in prior assistant messages
     tool_name_map = {}
@@ -87,9 +88,10 @@ def micro_compact(messages: list) -> list:
                         tool_name_map[block.id] = block.name
     # Clear old results (keep last KEEP_RECENT). Preserve read_file outputs because
     # they are reference material; compacting them forces the agent to re-read files.
+    # 把旧的工具结果替换成占位符（保留最近 3 条 + read_file 结果）
     to_clear = tool_results[:-KEEP_RECENT]
     for _, _, result in to_clear:
-        if not isinstance(result.get("content"), str) or len(result["content"]) <= 100:
+        if not isinstance(result.get("content"), str) or len(result["content"]) <= 100: # 过短的不压缩
             continue
         tool_id = result.get("tool_use_id", "")
         tool_name = tool_name_map.get(tool_id, "unknown")
@@ -100,8 +102,8 @@ def micro_compact(messages: list) -> list:
 
 
 # -- Layer 2: auto_compact - save transcript, summarize, replace messages --
-def auto_compact(messages: list, focus: str = "") -> list:
-    # Save full transcript to disk
+def auto_compact(messages: list) -> list:
+    # Save full transcript to disk 	保存到 .transcripts/
     TRANSCRIPT_DIR.mkdir(exist_ok=True)
     transcript_path = TRANSCRIPT_DIR / f"transcript_{int(time.time())}.jsonl"
     with open(transcript_path, "w") as f:
@@ -110,16 +112,12 @@ def auto_compact(messages: list, focus: str = "") -> list:
     print(f"[transcript saved: {transcript_path}]")
     # Ask LLM to summarize
     conversation_text = json.dumps(messages, default=str)[-80000:]
-    focus_instruction = ""
-    if focus:
-        focus_instruction = f" Pay special attention to preserving details about: {focus}."
     response = client.messages.create(
         model=MODEL,
         messages=[{"role": "user", "content":
             "Summarize this conversation for continuity. Include: "
             "1) What was accomplished, 2) Current state, 3) Key decisions made. "
-            "Be concise but preserve critical details."
-            f"{focus_instruction}\n\n" + conversation_text}],
+            "Be concise but preserve critical details.\n\n" + conversation_text}],
         max_tokens=2000,
     )
     summary = next((block.text for block in response.content if hasattr(block, "text")), "")
@@ -200,13 +198,14 @@ TOOLS = [
     {"name": "compact", "description": "Trigger manual conversation compression.",
      "input_schema": {"type": "object", "properties": {"focus": {"type": "string", "description": "What to preserve in the summary"}}}},
 ]
+# 模型可以带一个 focus 参数，告诉摘要应该保留什么
 
 
 def agent_loop(messages: list):
     while True:
-        # Layer 1: micro_compact before each LLM call
+        # Layer 1: micro_compact before each LLM call → 每轮都执行的静默压缩
         micro_compact(messages)
-        # Layer 2: auto_compact if token estimate exceeds threshold
+        # Layer 2: auto_compact if token estimate exceeds threshold → token 超标时的自动压缩
         if estimate_tokens(messages) > THRESHOLD:
             print("[auto_compact triggered]")
             messages[:] = auto_compact(messages)
@@ -219,12 +218,10 @@ def agent_loop(messages: list):
             return
         results = []
         manual_compact = False
-        compact_focus = ""
         for block in response.content:
             if block.type == "tool_use":
                 if block.name == "compact":
                     manual_compact = True
-                    compact_focus = block.input.get("focus", "")
                     output = "Compressing..."
                 else:
                     handler = TOOL_HANDLERS.get(block.name)
@@ -236,10 +233,10 @@ def agent_loop(messages: list):
                 print(str(output)[:200])
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
         messages.append({"role": "user", "content": results})
-        # Layer 3: manual compact triggered by the compact tool
+        # Layer 3: manual compact triggered by the compact tool → 模型主动请求的压缩
         if manual_compact:
             print("[manual compact]")
-            messages[:] = auto_compact(messages, focus=compact_focus)
+            messages[:] = auto_compact(messages)
             return
 
 

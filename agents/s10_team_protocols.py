@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Harness: protocols -- structured handshakes between models.
+# Harness 层: 协议 -- 模型之间的结构化握手
 """
 s10_team_protocols.py - Team Protocols
 
@@ -174,6 +175,7 @@ class TeammateManager:
         return f"Spawned '{name}' (role: {role})"
 
     def _teammate_loop(self, name: str, role: str, prompt: str):
+        # 重大工作前要提交通知，收到关闭请求需回应
         sys_prompt = (
             f"You are '{name}', role: {role}, at {WORKDIR}. "
             f"Submit plans via plan_approval before major work. "
@@ -181,7 +183,7 @@ class TeammateManager:
         )
         messages = [{"role": "user", "content": prompt}]
         tools = self._teammate_tools()
-        should_exit = False
+        should_exit = False     # 退出标志
         for _ in range(50):
             inbox = BUS.read_inbox(name)
             for msg in inbox:
@@ -211,11 +213,13 @@ class TeammateManager:
                         "tool_use_id": block.id,
                         "content": str(output),
                     })
+                    # 如果队友同意关闭，则设置退出标志
                     if block.name == "shutdown_response" and block.input.get("approve"):
                         should_exit = True
             messages.append({"role": "user", "content": results})
         member = self._find_member(name)
         if member:
+            # 根据退出标志设置状态
             member["status"] = "shutdown" if should_exit else "idle"
             self._save_config()
 
@@ -240,8 +244,9 @@ class TeammateManager:
                 if req_id in shutdown_requests:
                     shutdown_requests[req_id]["status"] = "approved" if approve else "rejected"
             BUS.send(
-                sender, "lead", args.get("reason", ""),
-                "shutdown_response", {"request_id": req_id, "approve": approve},
+                sender, "lead", args.get("reason", ""),     # 队友可以给个理由
+                "shutdown_response", 
+                {"request_id": req_id, "approve": approve}, # extra 携带 request_id + 审批结果
             )
             return f"Shutdown {'approved' if approve else 'rejected'}"
         if tool_name == "plan_approval":
@@ -351,10 +356,15 @@ def _run_edit(path: str, old_text: str, new_text: str) -> str:
 def handle_shutdown_request(teammate: str) -> str:
     req_id = str(uuid.uuid4())[:8]
     with _tracker_lock:
-        shutdown_requests[req_id] = {"target": teammate, "status": "pending"}
+        shutdown_requests[req_id] = {   # 记录到追踪器
+            "target": teammate, 
+            "status": "pending"
+        }
     BUS.send(
-        "lead", teammate, "Please shut down gracefully.",
-        "shutdown_request", {"request_id": req_id},
+        "lead", teammate, 
+        "Please shut down gracefully.",
+        "shutdown_request",         # 消息类型
+        {"request_id": req_id},     # extra 携带 request_id
     )
     return f"Shutdown request {req_id} sent to '{teammate}' (status: pending)"
 
@@ -367,12 +377,15 @@ def handle_plan_review(request_id: str, approve: bool, feedback: str = "") -> st
     with _tracker_lock:
         req["status"] = "approved" if approve else "rejected"
     BUS.send(
-        "lead", req["from"], feedback, "plan_approval_response",
+        "lead", req["from"],    # 发送给提交者
+        feedback,   # 反馈文字
+        "plan_approval_response",
         {"request_id": request_id, "approve": approve, "feedback": feedback},
     )
     return f"Plan {req['status']} for '{req['from']}'"
 
 
+# 查询关闭状态
 def _check_shutdown_status(request_id: str) -> str:
     with _tracker_lock:
         return json.dumps(shutdown_requests.get(request_id, {"error": "not found"}))
@@ -390,6 +403,7 @@ TOOL_HANDLERS = {
     "read_inbox":        lambda **kw: json.dumps(BUS.read_inbox("lead"), indent=2),
     "broadcast":         lambda **kw: BUS.broadcast("lead", kw["content"], TEAM.member_names()),
     "shutdown_request":  lambda **kw: handle_shutdown_request(kw["teammate"]),
+    # lead 的shutdown_response是查询关闭状态
     "shutdown_response": lambda **kw: _check_shutdown_status(kw.get("request_id", "")),
     "plan_approval":     lambda **kw: handle_plan_review(kw["request_id"], kw["approve"], kw.get("feedback", "")),
 }

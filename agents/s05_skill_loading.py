@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Harness: on-demand knowledge -- domain expertise, loaded when the model asks.
+# Harness 层: 按需知识 -- 模型开口要时才给的领域专长
 """
 s05_skill_loading.py - Skills
 
@@ -65,24 +66,24 @@ class SkillLoader:
     def _load_all(self):
         if not self.skills_dir.exists():
             return
-        for f in sorted(self.skills_dir.rglob("SKILL.md")):
+        for f in sorted(self.skills_dir.rglob("SKILL.md")): # 递归扫描
             text = f.read_text()
-            meta, body = self._parse_frontmatter(text)
-            name = meta.get("name", f.parent.name)
+            meta, body = self._parse_frontmatter(text)  # 拆分元数据与主体
+            name = meta.get("name", f.parent.name)  # 如果没有name，用目录名
             self.skills[name] = {"meta": meta, "body": body, "path": str(f)}
 
-    def _parse_frontmatter(self, text: str) -> tuple:
+    def _parse_frontmatter(self, text: str) -> tuple:   # 拆分YAML和正文
         """Parse YAML frontmatter between --- delimiters."""
         match = re.match(r"^---\n(.*?)\n---\n(.*)", text, re.DOTALL)
         if not match:
-            return {}, text
+            return {}, text     # 如果没有匹配到，则整段当正文
         try:
             meta = yaml.safe_load(match.group(1)) or {}
         except yaml.YAMLError:
             meta = {}
         return meta, match.group(2).strip()
 
-    def get_descriptions(self) -> str:
+    def get_descriptions(self) -> str:  # Layer 1 —— 轻量摘要
         """Layer 1: short descriptions for the system prompt."""
         if not self.skills:
             return "(no skills available)"
@@ -96,7 +97,7 @@ class SkillLoader:
             lines.append(line)
         return "\n".join(lines)
 
-    def get_content(self, name: str) -> str:
+    def get_content(self, name: str) -> str:       # Layer 2 —— 完整内容
         """Layer 2: full skill body returned in tool_result."""
         skill = self.skills.get(name)
         if not skill:

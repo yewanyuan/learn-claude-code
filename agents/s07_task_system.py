@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Harness: persistent tasks -- goals that outlive any single conversation.
+# Harness 层: 持久化任务 -- 比任何一次对话都长命的目标
 """
 s07_task_system.py - Tasks
 
@@ -47,13 +48,14 @@ SYSTEM = f"You are a coding agent at {WORKDIR}. Use task tools to plan and track
 class TaskManager:
     def __init__(self, tasks_dir: Path):
         self.dir = tasks_dir
-        self.dir.mkdir(exist_ok=True)
-        self._next_id = self._max_id() + 1
+        self.dir.mkdir(exist_ok=True)   # 确保 .tasks/ 目录存在
+        self._next_id = self._max_id() + 1  # 扫描已有文件，确定下一个 ID
 
     def _max_id(self) -> int:
         ids = [int(f.stem.split("_")[1]) for f in self.dir.glob("task_*.json")]
         return max(ids) if ids else 0
 
+    # 读写单个任务文件
     def _load(self, task_id: int) -> dict:
         path = self.dir / f"task_{task_id}.json"
         if not path.exists():
@@ -67,7 +69,9 @@ class TaskManager:
     def create(self, subject: str, description: str = "") -> str:
         task = {
             "id": self._next_id, "subject": subject, "description": description,
-            "status": "pending", "blockedBy": [], "owner": "",
+            "status": "pending",    # 新任务默认 pending
+            "blockedBy": [],    # 默认没有依赖
+            "owner": "",    # 默认没有所有者
         }
         self._save(task)
         self._next_id += 1
@@ -79,19 +83,21 @@ class TaskManager:
     def update(self, task_id: int, status: str = None,
                add_blocked_by: list = None, remove_blocked_by: list = None) -> str:
         task = self._load(task_id)
-        if status:
+        # 更新状态
+        if status:  
             if status not in ("pending", "in_progress", "completed"):
                 raise ValueError(f"Invalid status: {status}")
             task["status"] = status
             if status == "completed":
-                self._clear_dependency(task_id)
-        if add_blocked_by:
+                self._clear_dependency(task_id)     # 完成时解除依赖
+        if add_blocked_by:  # 添加依赖
             task["blockedBy"] = list(set(task["blockedBy"] + add_blocked_by))
-        if remove_blocked_by:
+        if remove_blocked_by:   # 移除依赖
             task["blockedBy"] = [x for x in task["blockedBy"] if x not in remove_blocked_by]
         self._save(task)
         return json.dumps(task, indent=2, ensure_ascii=False)
 
+    # 依赖解除: 完成任务时, 自动将其 ID 从其他任务的 blockedBy 中移除, 解锁后续任务
     def _clear_dependency(self, completed_id: int):
         """Remove completed_id from all other tasks' blockedBy lists."""
         for f in self.dir.glob("task_*.json"):
@@ -104,7 +110,7 @@ class TaskManager:
         tasks = []
         files = sorted(
             self.dir.glob("task_*.json"),
-            key=lambda f: int(f.stem.split("_")[1])
+            key=lambda f: int(f.stem.split("_")[1])     # 按照ID排序
         )
         for f in files:
             tasks.append(json.loads(f.read_text()))

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Harness: directory isolation -- parallel execution lanes that never collide.
+# Harness 层: 目录隔离 -- 永不碰撞的并行执行通道。
 """
 s12_worktree_task_isolation.py - Worktree + Task Isolation
 
@@ -50,6 +51,7 @@ client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 
 
+# Git仓库检测
 def detect_repo_root(cwd: Path) -> Path | None:
     """Return git repo root if cwd is inside a repo, else None."""
     try:
@@ -67,7 +69,7 @@ def detect_repo_root(cwd: Path) -> Path | None:
     except Exception:
         return None
 
-
+# 如果当前目录不在 Git 仓库内，则返回到 WORKDIR
 REPO_ROOT = detect_repo_root(WORKDIR) or WORKDIR
 
 SYSTEM = (
@@ -79,7 +81,7 @@ SYSTEM = (
 )
 
 
-# -- EventBus: append-only lifecycle events for observability --
+# -- EventBus: append-only lifecycle events for observability -- 生命周期事件日志
 class EventBus:
     def __init__(self, event_log_path: Path):
         self.path = event_log_path
@@ -87,6 +89,7 @@ class EventBus:
         if not self.path.exists():
             self.path.write_text("")
 
+    # 记录事件
     def emit(
         self,
         event: str,
@@ -105,6 +108,7 @@ class EventBus:
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload) + "\n")
 
+    # 读取最近的事件
     def list_recent(self, limit: int = 20) -> str:
         n = max(1, min(int(limit or 20), 200))
         lines = self.path.read_text(encoding="utf-8").splitlines()
@@ -153,10 +157,10 @@ class TaskManager:
             "description": description,
             "status": "pending",
             "owner": "",
-            "worktree": "",
-            "blockedBy": [],
-            "created_at": time.time(),
-            "updated_at": time.time(),
+            "worktree": "",             # 绑定的 worktree 名
+            "blockedBy": [], 
+            "created_at": time.time(),  # 创建时间
+            "updated_at": time.time(),  # 更新时间
         }
         self._save(task)
         self._next_id += 1
@@ -182,18 +186,18 @@ class TaskManager:
 
     def bind_worktree(self, task_id: int, worktree: str, owner: str = "") -> str:
         task = self._load(task_id)
-        task["worktree"] = worktree
+        task["worktree"] = worktree     # 记录worktree名
         if owner:
-            task["owner"] = owner
+            task["owner"] = owner       # 记录owner负责人
         if task["status"] == "pending":
-            task["status"] = "in_progress"
+            task["status"] = "in_progress"  # 如果任务状态为pending，则改为in_progress
         task["updated_at"] = time.time()
         self._save(task)
         return json.dumps(task, indent=2)
 
     def unbind_worktree(self, task_id: int) -> str:
         task = self._load(task_id)
-        task["worktree"] = ""
+        task["worktree"] = ""           # 清空worktree名
         task["updated_at"] = time.time()
         self._save(task)
         return json.dumps(task, indent=2)
@@ -215,6 +219,7 @@ class TaskManager:
             wt = f" wt={t['worktree']}" if t.get("worktree") else ""
             lines.append(f"{marker} #{t['id']}: {t['subject']}{owner}{wt}")
         return "\n".join(lines)
+    # 输出: [>] #1: 实现注册功能 owner=alice wt=auth-refactor
 
 
 TASKS = TaskManager(REPO_ROOT / ".tasks")
@@ -227,7 +232,7 @@ class WorktreeManager:
         self.repo_root = repo_root
         self.tasks = tasks
         self.events = events
-        self.dir = repo_root / ".worktrees"
+        self.dir = repo_root / ".worktrees"             # 额外的工作目录
         self.dir.mkdir(parents=True, exist_ok=True)
         self.index_path = self.dir / "index.json"
         if not self.index_path.exists():
@@ -275,6 +280,7 @@ class WorktreeManager:
                 return wt
         return None
 
+    # 校验名称
     def _validate_name(self, name: str):
         if not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", name or ""):
             raise ValueError(
@@ -283,13 +289,14 @@ class WorktreeManager:
 
     def create(self, name: str, task_id: int = None, base_ref: str = "HEAD") -> str:
         self._validate_name(name)
-        if self._find(name):
+        if self._find(name):    # 检查是否已存在
             raise ValueError(f"Worktree '{name}' already exists in index")
         if task_id is not None and not self.tasks.exists(task_id):
             raise ValueError(f"Task {task_id} not found")
 
-        path = self.dir / name
-        branch = f"wt/{name}"
+        path = self.dir / name      # .worktrees/auth-refactor/
+        branch = f"wt/{name}"       # 分支名: wt/auth-refactor
+        # 事件：创建前
         self.events.emit(
             "worktree.create.before",
             task={"id": task_id} if task_id is not None else {},
@@ -297,7 +304,7 @@ class WorktreeManager:
         )
         try:
             self._run_git(["worktree", "add", "-b", branch, str(path), base_ref])
-
+            # 注册到index.json
             entry = {
                 "name": name,
                 "path": str(path),
@@ -311,9 +318,9 @@ class WorktreeManager:
             idx["worktrees"].append(entry)
             self._save_index(idx)
 
-            if task_id is not None:
-                self.tasks.bind_worktree(task_id, name)
-
+            if task_id is not None: 
+                self.tasks.bind_worktree(task_id, name)     # 绑定到 task
+            # 事件：创建后
             self.events.emit(
                 "worktree.create.after",
                 task={"id": task_id} if task_id is not None else {},
@@ -326,6 +333,7 @@ class WorktreeManager:
             )
             return json.dumps(entry, indent=2)
         except Exception as e:
+            # 事件：创建失败
             self.events.emit(
                 "worktree.create.failed",
                 task={"id": task_id} if task_id is not None else {},
@@ -377,11 +385,15 @@ class WorktreeManager:
         if not path.exists():
             return f"Error: Worktree path missing: {path}"
 
+        '''
+        普通 bash 工具:  cwd = E:\project\                → 在主目录执行
+        worktree_run:    cwd = E:\project\.worktrees\auth-refactor\  → 在 worktree 目录执行
+        '''
         try:
             r = subprocess.run(
                 command,
                 shell=True,
-                cwd=path,
+                cwd=path,       # 在 worktree 目录下执行
                 capture_output=True,
                 text=True,
                 timeout=300,
@@ -392,6 +404,9 @@ class WorktreeManager:
             return "Error: Timeout (300s)"
 
     def remove(self, name: str, force: bool = False, complete_task: bool = False) -> str:
+        '''
+        complete_task = True → 删除目录, 完成绑定任务, 发出事件
+        '''
         wt = self._find(name)
         if not wt:
             return f"Error: Unknown worktree '{name}'"
@@ -404,15 +419,15 @@ class WorktreeManager:
         try:
             args = ["worktree", "remove"]
             if force:
-                args.append("--force")
+                args.append("--force")      # 强制删除
             args.append(wt["path"])
-            self._run_git(args)
+            self._run_git(args)         # git worktree remove
 
             if complete_task and wt.get("task_id") is not None:
                 task_id = wt["task_id"]
                 before = json.loads(self.tasks.get(task_id))
-                self.tasks.update(task_id, status="completed")
-                self.tasks.unbind_worktree(task_id)
+                self.tasks.update(task_id, status="completed")   # 标记完成任务（可选
+                self.tasks.unbind_worktree(task_id)         # 解除绑定
                 self.events.emit(
                     "task.completed",
                     task={
@@ -423,6 +438,7 @@ class WorktreeManager:
                     worktree={"name": name},
                 )
 
+            # 更新index.json
             idx = self._load_index()
             for item in idx.get("worktrees", []):
                 if item.get("name") == name:
@@ -445,6 +461,7 @@ class WorktreeManager:
             )
             raise
 
+    # 保留目录供后续使用
     def keep(self, name: str) -> str:
         wt = self._find(name)
         if not wt:

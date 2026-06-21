@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Harness: planning -- keeping the model on course without scripting the route.
+# Harness 层: 规划 -- 让模型不偏航, 但不替它画航线
 """
 s03_todo_write.py - TodoWrite
 
@@ -51,7 +52,7 @@ Prefer tools over prose."""
 # -- TodoManager: structured state the LLM writes to --
 class TodoManager:
     def __init__(self):
-        self.items = []
+        self.items = [] # 任务存储，每个任务是一个字典，包含id、text和status{"id": "1", "text": "读取文件", "status": "in_progress"}
 
     def update(self, items: list) -> str:
         if len(items) > 20:
@@ -60,19 +61,19 @@ class TodoManager:
         in_progress_count = 0
         for i, item in enumerate(items):
             text = str(item.get("text", "")).strip()
-            status = str(item.get("status", "pending")).lower()
-            item_id = str(item.get("id", str(i + 1)))
+            status = str(item.get("status", "pending")).lower() # 任务状态，默认pending
+            item_id = str(item.get("id", str(i + 1)))   # 任务id，默认i+1
             if not text:
                 raise ValueError(f"Item {item_id}: text required")
             if status not in ("pending", "in_progress", "completed"):
                 raise ValueError(f"Item {item_id}: invalid status '{status}'")
             if status == "in_progress":
-                in_progress_count += 1
+                in_progress_count += 1  # 统计in_progress的任务数量
             validated.append({"id": item_id, "text": text, "status": status})
-        if in_progress_count > 1:
+        if in_progress_count > 1:   # 同时只能有一个in_progress的任务
             raise ValueError("Only one task can be in_progress at a time")
-        self.items = validated
-        return self.render()
+        self.items = validated  # 更新任务列表
+        return self.render()    # 返回任务列表的字符串表示
 
     def render(self) -> str:
         if not self.items:
@@ -149,20 +150,54 @@ TOOL_HANDLERS = {
 TOOLS = [
     {"name": "bash", "description": "Run a shell command.",
      "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-    {"name": "read_file", "description": "Read file contents.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
+    {
+        "name": "read_file", 
+        "description": "Read file contents.", 
+        "input_schema": {
+            "type": "object", 
+            "properties": {
+                "path": {
+                    "type": "string"
+                }, 
+                "limit": {  # 可选参数，限制读取的行数
+                    "type": "integer"
+                }
+            }, 
+            "required": ["path"]
+        }
+    },
     {"name": "write_file", "description": "Write content to file.",
      "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
     {"name": "edit_file", "description": "Replace exact text in file.",
      "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
-    {"name": "todo", "description": "Update task list. Track progress on multi-step tasks.",
-     "input_schema": {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}, "required": ["id", "text", "status"]}}}, "required": ["items"]}},
+    {
+        "name": "todo", 
+        "description": "Update task list. Track progress on multi-step tasks.", 
+        "input_schema": {
+            "type": "object", 
+            "properties": {
+                "items": {
+                    "type": "array", 
+                    "items": {
+                        "type": "object", 
+                        "properties": {
+                            "id": {"type": "string"}, 
+                            "text": {"type": "string"}, 
+                            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
+                        }, 
+                        "required": ["id", "text", "status"]
+                    }
+                }
+            }, 
+            "required": ["items"]
+        }
+    },
 ]
 
 
 # -- Agent loop with nag reminder injection --
 def agent_loop(messages: list):
-    rounds_since_todo = 0
+    rounds_since_todo = 0   # 记录自上次调用 todo 后的轮数
     while True:
         # Nag reminder is injected below, alongside tool results
         response = client.messages.create(
@@ -187,6 +222,7 @@ def agent_loop(messages: list):
                 if block.name == "todo":
                     used_todo = True
         rounds_since_todo = 0 if used_todo else rounds_since_todo + 1
+        # 模型连续 3 轮以上不调用 todo 时注入提醒
         if rounds_since_todo >= 3:
             results.append({"type": "text", "text": "<reminder>Update your todos.</reminder>"})
         messages.append({"role": "user", "content": results})

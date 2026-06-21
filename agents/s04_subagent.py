@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Harness: context isolation -- protecting the model's clarity of thought.
+# Harness 层: 上下文隔离 -- 守护模型的思维清晰度
 """
 s04_subagent.py - Subagents
 
@@ -38,7 +39,7 @@ if os.getenv("ANTHROPIC_BASE_URL"):
 WORKDIR = Path.cwd()
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
-
+# 主agent，子agent
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use the task tool to delegate exploration or subtasks."
 SUBAGENT_SYSTEM = f"You are a coding subagent at {WORKDIR}. Complete the given task, then summarize your findings."
 
@@ -155,11 +156,11 @@ def agent_loop(messages: list):
         results = []
         for block in response.content:
             if block.type == "tool_use":
-                if block.name == "task":
+                if block.name == "task":    # ← 新增：特殊处理
                     desc = block.input.get("description", "subtask")
                     prompt = block.input.get("prompt", "")
                     print(f"> task ({desc}): {prompt[:80]}")
-                    output = run_subagent(prompt)
+                    output = run_subagent(prompt)   # 启动子 Agent
                 else:
                     handler = TOOL_HANDLERS.get(block.name)
                     output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
