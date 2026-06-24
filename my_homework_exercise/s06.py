@@ -1,4 +1,4 @@
-import os
+import os, ast, json
 import subprocess
 from pathlib import Path
 
@@ -24,7 +24,18 @@ client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 WORKDIR = Path.cwd()    # 获取当前工作目录
 
-SYSTEM = f"You are a coding agent at {WORKDIR}. Use bash to solve tasks. Act, don't explain."
+# New prompt
+SYSTEM = (
+    f"You are a coding agent at {WORKDIR}. "
+    "For complex sub-problems, use the task tool to spawn a subagent."
+)
+
+# s06: subagent gets its own system prompt — no task, no recursion
+SUB_SYSTEM = (
+    f"You are a coding agent at {WORKDIR}. "
+    "Complete the task you were given, then return a concise summary. "
+    "Do not delegate further."
+)
 
 # ── Tool definition: 工具定义 ────────────────────────────
 TOOLS = [
@@ -74,8 +85,43 @@ TOOLS = [
             "required": ["pattern"]
             }
         },
+    # s05: new tool
+    {
+        "name": "todo_write", 
+        "description": "Create and manage a task list for your current coding session.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string"},
+                            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
+                        },
+                        "required": ["content", "status"]
+                    }
+                }
+            },
+            "required": ["todos"]
+        }
+    },
 ]
 
+#  NEW in s06: Subagent — fresh messages[], summary only. NO "task" tool
+SUB_TOOLS = [
+    {"name": "bash", "description": "Run a shell command.",
+     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
+    {"name": "read_file", "description": "Read file contents.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
+    {"name": "write_file", "description": "Write content to a file.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
+    {"name": "edit_file", "description": "Replace exact text in a file once.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
+    {"name": "glob", "description": "Find files matching a glob pattern.",
+     "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
+]
 
 # ── Tool execution ────────────────────────────────────────
 def run_bash(command: str) -> str:
@@ -156,14 +202,129 @@ def run_glob(pattern: str) -> str:
     except Exception as e:
         return f"Error: {e}"
 
+# 数据清洗与校验
+def _normalize_todos(todos):
+    if isinstance(todos, str):
+        try:
+            # 如果传入的是字符串，先尝试用 json.loads 解析
+            todos = json.loads(todos)
+        except json.JSONDecodeError:
+            try:
+                # 如果失败，降级尝试用 ast.literal_eval
+                todos = ast.literal_eval(todos)
+            except (SyntaxError, ValueError):
+                return None, "Error: todos must be a list or JSON array string"
+    if not isinstance(todos, list):
+        # 确保最终解析出来的 todos 是一个列表
+        return None, "Error: todos must be a list"
+    for i, t in enumerate(todos):
+        # 确保每一项是字典
+        if not isinstance(t, dict):
+            return None, f"Error: todos[{i}] must be an object"
+        # 确保每一项包含 'content' 和 'status'
+        if "content" not in t or "status" not in t:
+            return None, f"Error: todos[{i}] missing 'content' or 'status'"
+        # 确保 status 只能是允许的三种状态
+        if t["status"] not in ("pending", "in_progress", "completed"):
+            return None, f"Error: todos[{i}] has invalid status '{t['status']}'"
+    return todos, None
+
+# todo_write 工具，接收一个带状态的列表，保存在当前进程内存中，同时在终端显示进度
+def run_todo_write(todos: list) -> str:
+    global CURRENT_TODOS
+    # 调用清洗函数，如果报错直接把错误字符串返回给大模型
+    todos, error = _normalize_todos(todos)
+    if error:
+        return error
+    # 清洗成功后，更新全局任务列表
+    CURRENT_TODOS = todos
+    lines = ["\n\033[33m## Current Tasks\033[0m"]
+    for t in CURRENT_TODOS:
+        icon = {"pending": " ", "in_progress": "\033[36m▸\033[0m", "completed": "\033[32m✓\033[0m"}[t["status"]]
+        lines.append(f"  [{icon}] {t['content']}")
+    print("\n".join(lines))
+    # 返回给大模型 确认信息
+    return f"Updated {len(CURRENT_TODOS)} tasks"
+
 # 映射，工具分发
 TOOL_HANDLERS = {
+    "bash": run_bash, "read_file": run_read, "write_file": run_write,
+    "edit_file": run_edit, "glob": run_glob,"todo_write": run_todo_write,
+}
+
+SUB_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
     "edit_file": run_edit, "glob": run_glob,
 }
 
+# 提取纯文本
+def extract_text(content) -> str:
+    """Extract text from message content blocks."""
+    if not isinstance(content, list):
+        return str(content)
+    return "\n".join(getattr(b, "text", "") for b in content if getattr(b, "type", None) == "text")
+
+# 子代理
+def spawn_subagent(description: str) -> str:
+    """Spawn a subagent with fresh messages[], return summary only."""
+    # 子 Agent 的工具SUB_TOOLS：基础工具，但没有 task（禁止递归）
+    print(f"\n\033[35m[Subagent spawned]\033[0m")
+    # 上下文隔离，子代理启动时，主代理只传给它一句 description（任务描述）
+    messages = [{"role": "user", "content": description}]  # fresh context
+
+    for _ in range(30):  # safety limit
+        response = client.messages.create(
+            model=MODEL, system=SUB_SYSTEM,
+            messages=messages, tools=SUB_TOOLS, max_tokens=8000,
+        )
+        messages.append({"role": "assistant", "content": response.content})
+        if response.stop_reason != "tool_use":
+            break
+        results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                # Issue 1: subagent also runs hooks (permissions apply)
+                blocked = trigger_hooks("PreToolUse", block)
+                if blocked:
+                    results.append({"type": "tool_result", "tool_use_id": block.id,
+                                    "content": str(blocked)})
+                    continue
+                handler = SUB_HANDLERS.get(block.name)
+                output = handler(**block.input) if handler else f"Unknown: {block.name}"
+                trigger_hooks("PostToolUse", block, output)
+                # 日志会被压缩，且加上 [sub] 前缀
+                print(f"  \033[90m[sub] {block.name}: {str(output)[:100]}\033[0m")
+                results.append({"type": "tool_result", "tool_use_id": block.id,
+                                "content": output})
+        messages.append({"role": "user", "content": results})
+
+    # Issue 5: fallback if safety limit hit during tool_use
+    result = extract_text(messages[-1]["content"])
+    # 如果子代理跑满了循环还没结束，代码会从后往前遍历历史记录，努力寻找最后一段 assistant 的文字回复
+    if not result:
+        # last message is tool_result, look backwards for assistant text
+        for msg in reversed(messages):
+            if msg["role"] == "assistant":
+                result = extract_text(msg["content"])
+                if result:
+                    break
+        # 无结果则返回提示
+        if not result:
+            result = "Subagent stopped after 30 turns without final answer."
+    print(f"\033[35m[Subagent done]\033[0m")
+    return result  # only summary, entire message history discarded
+
+# 挂载到主代理
+TOOLS.append({
+    "name": "task",
+    "description": "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
+    "input_schema": {"type": "object", "properties": {"description": {"type": "string"}}, "required": ["description"]},
+})
+# 把 spawn_subagent 包装成一个名叫 task 的普通工具，注册给主代理
+TOOL_HANDLERS["task"] = spawn_subagent
+
 # ═══════════════════════════════════════════════════════════
-#  NEW in s04: hook
+#  NEW in s04: Hook System
 # ═══════════════════════════════════════════════════════════
 
 # hook 注册表，全局字典 4个事件
@@ -262,9 +423,21 @@ register_hook("PreToolUse", log_hook)   # log_hook（后注册，后执行）
 register_hook("PostToolUse", large_output_hook)
 register_hook("Stop", summary_hook)
 
-# ── The core pattern: no hard-coded check ──
+# ── s04 + nag reminder counter ──
+
+rounds_since_todo = 0
+
 def agent_loop(messages: list):
+    global rounds_since_todo
     while True:
+        # 模型连续 3 轮没调 todo_write 时，自动注入一条提醒
+        if rounds_since_todo >= 3 and messages:
+            messages.append({
+                "role": "user",
+                "content": "<reminder>Update your todos.</reminder>",
+            })
+        rounds_since_todo = 0
+
         response = client.messages.create(
             model=MODEL, system=SYSTEM, messages=messages,
             tools=TOOLS, max_tokens=8000,
@@ -314,7 +487,7 @@ def agent_loop(messages: list):
 
 # ── Entry point ──────────────────────────────────────────
 if __name__ == "__main__":
-    print("s04: hook Use")
+    print("s06: Subagent Split tasks")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     history = []

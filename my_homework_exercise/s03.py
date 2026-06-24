@@ -257,7 +257,7 @@ def agent_loop(messages: list):
 
 # ── Entry point ──────────────────────────────────────────
 if __name__ == "__main__":
-    print("s02: Tool Use")
+    print("s03: safe")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     history = []

@@ -1,4 +1,4 @@
-import os
+import os, ast, json
 import subprocess
 from pathlib import Path
 
@@ -24,7 +24,12 @@ client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 WORKDIR = Path.cwd()    # 获取当前工作目录
 
-SYSTEM = f"You are a coding agent at {WORKDIR}. Use bash to solve tasks. Act, don't explain."
+# 新prompt，告诉模型它是一个编码代理，并且在执行多步骤任务前要先写todo
+SYSTEM = (
+    f"You are a coding agent at {WORKDIR}. "
+    "Before starting any multi-step task, use todo_write to plan your steps. "
+    "Update status as you go."
+)
 
 # ── Tool definition: 工具定义 ────────────────────────────
 TOOLS = [
@@ -74,6 +79,28 @@ TOOLS = [
             "required": ["pattern"]
             }
         },
+    # s05: new tool
+    {
+        "name": "todo_write", 
+        "description": "Create and manage a task list for your current coding session.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string"},
+                            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
+                        },
+                        "required": ["content", "status"]
+                    }
+                }
+            },
+            "required": ["todos"]
+        }
+    },
 ]
 
 
@@ -156,10 +183,54 @@ def run_glob(pattern: str) -> str:
     except Exception as e:
         return f"Error: {e}"
 
+# 数据清洗与校验
+def _normalize_todos(todos):
+    if isinstance(todos, str):
+        try:
+            # 如果传入的是字符串，先尝试用 json.loads 解析
+            todos = json.loads(todos)
+        except json.JSONDecodeError:
+            try:
+                # 如果失败，降级尝试用 ast.literal_eval
+                todos = ast.literal_eval(todos)
+            except (SyntaxError, ValueError):
+                return None, "Error: todos must be a list or JSON array string"
+    if not isinstance(todos, list):
+        # 确保最终解析出来的 todos 是一个列表
+        return None, "Error: todos must be a list"
+    for i, t in enumerate(todos):
+        # 确保每一项是字典
+        if not isinstance(t, dict):
+            return None, f"Error: todos[{i}] must be an object"
+        # 确保每一项包含 'content' 和 'status'
+        if "content" not in t or "status" not in t:
+            return None, f"Error: todos[{i}] missing 'content' or 'status'"
+        # 确保 status 只能是允许的三种状态
+        if t["status"] not in ("pending", "in_progress", "completed"):
+            return None, f"Error: todos[{i}] has invalid status '{t['status']}'"
+    return todos, None
+
+# todo_write 工具，接收一个带状态的列表，保存在当前进程内存中，同时在终端显示进度
+def run_todo_write(todos: list) -> str:
+    global CURRENT_TODOS
+    # 调用清洗函数，如果报错直接把错误字符串返回给大模型
+    todos, error = _normalize_todos(todos)
+    if error:
+        return error
+    # 清洗成功后，更新全局任务列表
+    CURRENT_TODOS = todos
+    lines = ["\n\033[33m## Current Tasks\033[0m"]
+    for t in CURRENT_TODOS:
+        icon = {"pending": " ", "in_progress": "\033[36m▸\033[0m", "completed": "\033[32m✓\033[0m"}[t["status"]]
+        lines.append(f"  [{icon}] {t['content']}")
+    print("\n".join(lines))
+    # 返回给大模型 确认信息
+    return f"Updated {len(CURRENT_TODOS)} tasks"
+
 # 映射，工具分发
 TOOL_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
-    "edit_file": run_edit, "glob": run_glob,
+    "edit_file": run_edit, "glob": run_glob,"todo_write": run_todo_write,
 }
 
 # ═══════════════════════════════════════════════════════════
@@ -262,9 +333,21 @@ register_hook("PreToolUse", log_hook)   # log_hook（后注册，后执行）
 register_hook("PostToolUse", large_output_hook)
 register_hook("Stop", summary_hook)
 
-# ── The core pattern: no hard-coded check ──
+# ── s04 + nag reminder counter ──
+
+rounds_since_todo = 0
+
 def agent_loop(messages: list):
+    global rounds_since_todo
     while True:
+        # 模型连续 3 轮没调 todo_write 时，自动注入一条提醒
+        if rounds_since_todo >= 3 and messages:
+            messages.append({
+                "role": "user",
+                "content": "<reminder>Update your todos.</reminder>",
+            })
+        rounds_since_todo = 0
+
         response = client.messages.create(
             model=MODEL, system=SYSTEM, messages=messages,
             tools=TOOLS, max_tokens=8000,
@@ -314,7 +397,7 @@ def agent_loop(messages: list):
 
 # ── Entry point ──────────────────────────────────────────
 if __name__ == "__main__":
-    print("s02: Tool Use")
+    print("s05: Planning work")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     history = []

@@ -121,6 +121,7 @@ def run_glob(pattern: str) -> str:
     except Exception as e:
         return f"Error: {e}"
 
+# 规范化 todos 输入
 def _normalize_todos(todos):
     if isinstance(todos, str):
         try:
@@ -206,6 +207,7 @@ def extract_text(content) -> str:
 
 def spawn_subagent(description: str) -> str:
     """Spawn a subagent with fresh messages[], return summary only."""
+    # 子 Agent 的工具SUB_TOOLS：基础工具，但没有 task（禁止递归）
     print(f"\n\033[35m[Subagent spawned]\033[0m")
     messages = [{"role": "user", "content": description}]  # fresh context
 
