@@ -455,7 +455,8 @@ def agent_loop(messages: list):
                 messages.append({"role": "user", "content": force})
                 continue
             return
-
+        
+        rounds_since_todo += 1
         # Execute each tool call, collect results Execute each tool call, collect results
         results = []
         for block in response.content:
