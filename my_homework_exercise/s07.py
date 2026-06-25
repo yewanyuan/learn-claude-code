@@ -1,4 +1,4 @@
-import os, ast, json
+import os, ast, json, yaml
 import subprocess
 from pathlib import Path
 
@@ -23,12 +23,62 @@ if os.getenv("ANTHROPIC_BASE_URL"):
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 WORKDIR = Path.cwd()    # 获取当前工作目录
+SKILLS_DIR = WORKDIR / "skills"
 
-# New prompt
-SYSTEM = (
-    f"You are a coding agent at {WORKDIR}. "
-    "For complex sub-problems, use the task tool to spawn a subagent."
-)
+# s07: 元数据解析
+def _parse_frontmatter(text: str) -> tuple[dict, str]:
+    """将文件拆分为元数据(meta，包含 name 和 description)和正文(body)"""
+    if not text.startswith("---"):
+        return {}, text
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}, text
+    try:
+        meta = yaml.safe_load(parts[1]) or {}
+    except yaml.YAMLError:
+        meta = {}
+    return meta, parts[2].strip()
+
+# Build skill registry at startup (used for safe lookup in load_skill)
+SKILL_REGISTRY: dict[str, dict] = {}
+
+def _scan_skills():
+    """Scan skills/ dir, populate SKILL_REGISTRY with name/description/content."""
+    if not SKILLS_DIR.exists():
+        return
+    # 读取每个子目录下的 SKILL.md，解析出元数据和完整内容
+    for d in sorted(SKILLS_DIR.iterdir()):
+        if not d.is_dir():
+            continue
+        manifest = d / "SKILL.md"
+        if manifest.exists():
+            raw = manifest.read_text()
+            meta, body = _parse_frontmatter(raw)
+            name = meta.get("name", d.name)
+            desc = meta.get("description", raw.split("\n")[0].lstrip("#").strip())
+            # 缓存到全局字典
+            SKILL_REGISTRY[name] = {"name": name, "description": desc, "content": raw}
+
+_scan_skills()  # 初始化技能注册表
+
+def list_skills() -> str:
+    """List all skills (name + one-line description)."""
+    if not SKILL_REGISTRY:
+        return "(no skills found)"
+    # 把技能的名字和一句话描述（目录）放进 System Prompt
+    return "\n".join(f"- **{s['name']}**: {s['description']}" for s in SKILL_REGISTRY.values())
+
+# s07: SYSTEM includes skill catalog (cheap — just names + descriptions)
+def build_system() -> str:
+    """Build SYSTEM prompt with skill catalog injected at startup."""
+    catalog = list_skills()
+    return (
+        f"You are a coding agent at {WORKDIR}. "
+        f"Skills available:\n{catalog}\n"
+        "Use load_skill to get full details when needed."
+    )
+
+SYSTEM = build_system()
 
 # s06: subagent gets its own system prompt — no task, no recursion
 SUB_SYSTEM = (
@@ -36,6 +86,17 @@ SUB_SYSTEM = (
     "Complete the task you were given, then return a concise summary. "
     "Do not delegate further."
 )
+
+# ═══════════════════════════════════════════════════════════
+#  NEW in s07: load_skill — 安全的延迟加载
+# ═══════════════════════════════════════════════════════════
+
+def load_skill(name: str) -> str:
+    """Load full skill content. Lookup via registry — no path traversal."""
+    skill = SKILL_REGISTRY.get(name)
+    if not skill:
+        return f"Skill not found: {name}"
+    return skill["content"]
 
 # ── Tool definition: 工具定义 ────────────────────────────
 TOOLS = [
@@ -499,6 +560,7 @@ if __name__ == "__main__":
             break
         if query.strip().lower() in ("q", "exit", ""):
             break
+        trigger_hooks("UserPromptSubmit", query)
         history.append({"role": "user", "content": query})
         agent_loop(history)
         # Print the model's final text response 打印模型的最终文本响应
