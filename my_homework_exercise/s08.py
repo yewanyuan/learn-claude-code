@@ -1,3 +1,6 @@
+'''
+重点章节，484～
+'''
 import os, ast, json, yaml, time
 import subprocess
 from pathlib import Path
@@ -70,6 +73,14 @@ def list_skills() -> str:
     # 把技能的名字和一句话描述（目录）放进 System Prompt
     return "\n".join(f"- **{s['name']}**: {s['description']}" for s in SKILL_REGISTRY.values())
 
+#  NEW in s07: load_skill — 安全的延迟加载
+def load_skill(name: str) -> str:
+    """Load full skill content. Lookup via registry — no path traversal."""
+    skill = SKILL_REGISTRY.get(name)
+    if not skill:
+        return f"Skill not found: {name}"
+    return skill["content"]
+
 # s07: SYSTEM includes skill catalog (cheap — just names + descriptions)
 def build_system() -> str:
     """Build SYSTEM prompt with skill catalog injected at startup."""
@@ -82,109 +93,12 @@ def build_system() -> str:
 
 SYSTEM = build_system()
 
-# s06: subagent gets its own system prompt — no task, no recursion
+# s08: subagent gets its own system prompt — no compact, no skill loading
 SUB_SYSTEM = (
     f"You are a coding agent at {WORKDIR}. "
     "Complete the task you were given, then return a concise summary. "
     "Do not delegate further."
 )
-
-# ═══════════════════════════════════════════════════════════
-#  NEW in s07: load_skill — 安全的延迟加载
-# ═══════════════════════════════════════════════════════════
-
-def load_skill(name: str) -> str:
-    """Load full skill content. Lookup via registry — no path traversal."""
-    skill = SKILL_REGISTRY.get(name)
-    if not skill:
-        return f"Skill not found: {name}"
-    return skill["content"]
-
-# ── Tool definition: 工具定义 ────────────────────────────
-TOOLS = [
-    {
-        "name": "bash",
-        "description": "Run a shell command.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"command": {"type": "string"}},
-            "required": ["command"],
-            },
-        },
-    {
-        "name": "read_file", 
-        "description": "Read file contents.",
-        # 定义了输入参数的结构
-        "input_schema": {
-            "type": "object",   # 输入参数是一个 JSON 对象
-            "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, 
-            "required": ["path"]    # 列出哪些参数是必填
-            }
-        },
-    {
-        "name": "write_file", 
-        "description": "Write content to a file.",
-        "input_schema": {
-            "type": "object", 
-            "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, 
-            "required": ["path", "content"]
-            }
-        },
-    {
-        "name": "edit_file", 
-        "description": "Replace exact text in a file once.",
-        "input_schema": {
-            "type": "object", 
-            "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, 
-            "required": ["path", "old_text", "new_text"]
-            }
-        },
-    {
-        "name": "glob", 
-        "description": "Find files matching a glob pattern.",
-        "input_schema": {
-            "type": "object", 
-            "properties": {"pattern": {"type": "string"}}, 
-            "required": ["pattern"]
-            }
-        },
-    # s05: new tool
-    {
-        "name": "todo_write", 
-        "description": "Create and manage a task list for your current coding session.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "todos": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "content": {"type": "string"},
-                            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
-                        },
-                        "required": ["content", "status"]
-                    }
-                }
-            },
-            "required": ["todos"]
-        }
-    },
-]
-
-#  NEW in s06: Subagent — fresh messages[], summary only. NO "task" tool
-SUB_TOOLS = [
-    {"name": "bash", "description": "Run a shell command.",
-     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-    {"name": "read_file", "description": "Read file contents.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
-    {"name": "write_file", "description": "Write content to a file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
-    {"name": "edit_file", "description": "Replace exact text in a file once.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
-    {"name": "glob", "description": "Find files matching a glob pattern.",
-     "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
-]
 
 # ── Tool execution ────────────────────────────────────────
 def run_bash(command: str) -> str:
@@ -309,15 +223,353 @@ def run_todo_write(todos: list) -> str:
     # 返回给大模型 确认信息
     return f"Updated {len(CURRENT_TODOS)} tasks"
 
-# 映射，工具分发
-TOOL_HANDLERS = {
-    "bash": run_bash, "read_file": run_read, "write_file": run_write,
-    "edit_file": run_edit, "glob": run_glob,"todo_write": run_todo_write,
-}
+# 提取纯文本
+def extract_text(content) -> str:
+    """Extract text from message content blocks."""
+    if not isinstance(content, list):
+        return str(content)
+    return "\n".join(getattr(b, "text", "") for b in content if getattr(b, "type", None) == "text")
+
+#  NEW in s06: Subagent — fresh messages[], summary only. NO "task" tool
+SUB_TOOLS = [
+    {"name": "bash", "description": "Run a shell command.",
+     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
+    {"name": "read_file", "description": "Read file contents.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
+    {"name": "write_file", "description": "Write content to a file.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
+    {"name": "edit_file", "description": "Replace exact text in a file once.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
+    {"name": "glob", "description": "Find files matching a glob pattern.",
+     "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
+]
 
 SUB_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
     "edit_file": run_edit, "glob": run_glob,
+}
+
+# 子代理
+def spawn_subagent(description: str) -> str:
+    """Spawn a subagent with fresh messages[], return summary only."""
+    # 子 Agent 的工具SUB_TOOLS：基础工具，但没有 task（禁止递归）
+    print(f"\n\033[35m[Subagent spawned]\033[0m")
+    # 上下文隔离，子代理启动时，主代理只传给它一句 description（任务描述）
+    messages = [{"role": "user", "content": description}]  # fresh context
+
+    for _ in range(30):  # safety limit
+        response = client.messages.create(
+            model=MODEL, system=SUB_SYSTEM,
+            messages=messages, tools=SUB_TOOLS, max_tokens=8000,
+        )
+        messages.append({"role": "assistant", "content": response.content})
+        if response.stop_reason != "tool_use":
+            break
+        results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                # Issue 1: subagent also runs hooks (permissions apply)
+                blocked = trigger_hooks("PreToolUse", block)
+                if blocked:
+                    results.append({"type": "tool_result", "tool_use_id": block.id,
+                                    "content": str(blocked)})
+                    continue
+                handler = SUB_HANDLERS.get(block.name)
+                output = handler(**block.input) if handler else f"Unknown: {block.name}"
+                trigger_hooks("PostToolUse", block, output)
+                # 日志会被压缩，且加上 [sub] 前缀
+                print(f"  \033[90m[sub] {block.name}: {str(output)[:100]}\033[0m")
+                results.append({"type": "tool_result", "tool_use_id": block.id,
+                                "content": output})
+        messages.append({"role": "user", "content": results})
+
+    # Issue 5: fallback if safety limit hit during tool_use
+    result = extract_text(messages[-1]["content"])
+    # 如果子代理跑满了循环还没结束，代码会从后往前遍历历史记录，努力寻找最后一段 assistant 的文字回复
+    if not result:
+        # last message is tool_result, look backwards for assistant text
+        for msg in reversed(messages):
+            if msg["role"] == "assistant":
+                result = extract_text(msg["content"])
+                if result:
+                    break
+        # 无结果则返回提示
+        if not result:
+            result = "Subagent stopped after 30 turns without final answer."
+    print(f"\033[35m[Subagent done]\033[0m")
+    return result  # only summary, entire message history discarded
+
+
+# ═══════════════════════════════════════════════════════════
+#  NEW in s08: Four-Layer Compaction Pipeline
+# ═══════════════════════════════════════════════════════════
+CONTEXT_LIMIT = 50000   # 上下文限制
+KEEP_RECENT = 3     # 保留最近x轮对话
+PERSIST_THRESHOLD = 30000   # 持久化阈值
+
+def estimate_size(msgs): return len(str(msgs))  # 估算消息大小
+
+def _block_type(block):
+    # 如果 block 是字典，则返回它 “type” 键的值，否则获取内容块类型
+    return block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+
+
+def _message_has_tool_use(msg):
+    # 检查消息是否包含工具使用
+    if msg.get("role") != "assistant":
+        return False
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    # 意一个块的类型是 tool_use，则True
+    return any(_block_type(block) == "tool_use" for block in content)
+
+
+def _is_tool_result_message(msg):
+    # 检查消息是否包含工具结果
+    if msg.get("role") != "user":
+        return False
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(block, dict) and block.get("type") == "tool_result"
+               for block in content)
+
+
+# L1: snipCompact — 裁剪中间消息
+def snip_compact(messages, max_messages=50):
+    if len(messages) <= max_messages: return messages
+    keep_head, keep_tail = 3, max_messages - 3  # 计划头、尾部消息数量
+    # 确定头部保留区的结束索引和尾部保留区的开始索引
+    head_end, tail_start = keep_head, len(messages) - keep_tail
+    # 如果头部最后一条消息包含了工具调用（避免与工具结果拆散）
+    if head_end > 0 and _message_has_tool_use(messages[head_end - 1]):
+        while head_end < len(messages) and _is_tool_result_message(messages[head_end]):
+            head_end += 1   # 扩展头部边界，直至工具结果齐了
+    # 尾部起始索引有效 + 尾部第一条消息是工具结果
+    if (tail_start > 0 and tail_start < len(messages)
+            and _is_tool_result_message(messages[tail_start])
+            and _message_has_tool_use(messages[tail_start - 1])):
+        tail_start -= 1 # 索引向前移
+    if head_end >= tail_start:
+        # 头部和尾部重叠，直接返回原消息
+        return messages
+    snipped = tail_start - head_end # 计算被裁剪掉的消息数量
+    return messages[:head_end] + [{"role": "user", "content": f"[snipped {snipped} messages]"}] + messages[tail_start:]
+
+
+# L2: microCompact — 旧结果占位替换
+# 辅助函数 收集消息历史中所有的工具结果块
+def collect_tool_results(messages):
+    blocks = []
+    for mi, msg in enumerate(messages):
+        # 不是user的消息则跳过，不是列表的content也跳过
+        if msg.get("role") != "user" or not isinstance(msg.get("content"), list): 
+            continue
+        # 遍历消息内容块
+        for bi, block in enumerate(msg["content"]):
+            # 收集历史消息中的工具结果块
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                blocks.append((mi, bi, block))
+    return blocks
+
+# 第二层压缩主函数
+def micro_compact(messages):
+    tool_results = collect_tool_results(messages)   # 收集工具结果
+    if len(tool_results) <= KEEP_RECENT:    # 结果总数不超过x个
+        return messages
+    for _, _, block in tool_results[:-KEEP_RECENT]:
+        if len(block.get("content", "")) > 120:
+            # 内容长度超了，则将直接替换为提示语
+            block["content"] = "[Earlier tool result compacted. Re-run if needed.]"
+    return messages
+
+
+# L3: toolResultBudget — 持久化大输出到磁盘
+# 辅助函数 持久化大输出
+def persist_large_output(tool_use_id, output):
+    if len(output) <= PERSIST_THRESHOLD:    # 长度小于等于阈值 直接返回
+        return output
+    TOOL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = TOOL_RESULTS_DIR / f"{tool_use_id}.txt"  # 构建保存路径
+    if not path.exists(): path.write_text(output)
+    # 返回一个精简的 XML 格式提示给大模型，包含完整输出的文件路径和预览
+    return f"<persisted-output>\nFull output: {path}\nPreview:\n{output[:2000]}\n</persisted-output>"
+
+# 第三层压缩主函数
+def tool_result_budget(messages, max_bytes=200_000):
+    last = messages[-1] if messages else None   # 获取最后一条消息
+    # 不符合要求 直接返回
+    if not last or last.get("role") != "user" or not isinstance(last.get("content"), list): return messages
+    # 提取最后一条消息中的所有工具结果块及其索引
+    blocks = [(i, b) for i, b in enumerate(last["content"]) if isinstance(b, dict) and b.get("type") == "tool_result"]
+    total = sum(len(str(b.get("content", ""))) for _, b in blocks)  # 计算所有工具结果块内容的总长度
+    if total <= max_bytes: # 总大小没有超过预算，返回 结束
+        return messages
+    # 排序
+    ranked = sorted(blocks, key=lambda p: len(str(p[1].get("content", ""))), reverse=True)
+    for _, block in ranked:
+        if total <= max_bytes: break    # 大小符合预算，结束
+        content = str(block.get("content", ""))
+        if len(content) <= PERSIST_THRESHOLD: continue
+        tid = block.get("tool_use_id", "unknown")
+        # 持久化替换
+        block["content"] = persist_large_output(tid, content)
+        # 重新计算，判断大小是否满足预算
+        total = sum(len(str(b.get("content", ""))) for _, b in blocks)
+    return messages
+
+
+# L4: autoCompact — LLM 全量总结
+# 辅助函数 将当前历史记录备份转储到磁盘
+def write_transcript(messages):
+    TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+    # 以当前时间戳命名，生成 .jsonl 格式的文件路径
+    path = TRANSCRIPT_DIR / f"transcript_{int(time.time())}.jsonl"
+    with path.open("w") as f:
+        # 每条消息转换为 JSON 字符串并写入文件，每条占一行
+        for msg in messages: f.write(json.dumps(msg, default=str) + "\n")
+    return path
+
+# 总结函数
+def summarize_history(messages):
+    # 消息list转为json字符串
+    conversation = json.dumps(messages, default=str)[:80000]    
+    prompt = ("Summarize this coding-agent conversation so work can continue.\n"
+              "Preserve: 1. current goal, 2. key findings/decisions, 3. files read/changed, "
+              "4. remaining work, 5. user constraints.\nBe compact but concrete.\n\n" + conversation)
+    response = client.messages.create(model=MODEL, messages=[{"role": "user", "content": prompt}], max_tokens=2000)
+    return "\n".join(
+        # 获取文本块内容
+        getattr(block, "text", "")
+        for block in response.content
+        if getattr(block, "type", None) == "text").strip() or "(empty summary)"
+
+# 第四层压缩主函数
+def compact_history(messages):
+    transcript_path = write_transcript(messages)    # 备份历史到磁盘
+    print(f"[transcript saved: {transcript_path}]")
+    summary = summarize_history(messages)   # 生成历史总结
+    # 丢弃所有原始历史消息，只返回一条包含总结的新 user 消息，让对话从头开始
+    return [{"role": "user", "content": f"[Compacted]\n\n{summary}"}]
+
+
+# 紧急策略 - API 报错时触发
+def reactive_compact(messages):
+    transcript = write_transcript(messages)
+    summary = summarize_history(messages)
+    tail_start = max(0, len(messages) - 5)  # 保留最近 5 条消息的起始索引
+    if (tail_start > 0 and tail_start < len(messages)   # 索引有效
+            and _is_tool_result_message(messages[tail_start])   # 消息是工具结果
+            and _message_has_tool_use(messages[tail_start - 1])):   # 前一条是工具调用
+        tail_start -= 1 # 向前多保留一条消息，把工具调用也留住
+    return [{"role": "user", "content": f"[Reactive compact]\n\n{summary}"}, *messages[tail_start:]]
+
+# ── Tool definition: 工具定义 ────────────────────────────
+TOOLS = [
+    {
+        "name": "bash",
+        "description": "Run a shell command.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+            },
+        },
+    {
+        "name": "read_file", 
+        "description": "Read file contents.",
+        # 定义了输入参数的结构
+        "input_schema": {
+            "type": "object",   # 输入参数是一个 JSON 对象
+            "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, 
+            "required": ["path"]    # 列出哪些参数是必填
+            }
+        },
+    {
+        "name": "write_file", 
+        "description": "Write content to a file.",
+        "input_schema": {
+            "type": "object", 
+            "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, 
+            "required": ["path", "content"]
+            }
+        },
+    {
+        "name": "edit_file", 
+        "description": "Replace exact text in a file once.",
+        "input_schema": {
+            "type": "object", 
+            "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, 
+            "required": ["path", "old_text", "new_text"]
+            }
+        },
+    {
+        "name": "glob", 
+        "description": "Find files matching a glob pattern.",
+        "input_schema": {
+            "type": "object", 
+            "properties": {"pattern": {"type": "string"}}, 
+            "required": ["pattern"]
+            }
+        },
+    # s05: new tool
+    {
+        "name": "todo_write", 
+        "description": "Create and manage a task list for your current coding session.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string"},
+                            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
+                        },
+                        "required": ["content", "status"]
+                    }
+                }
+            },
+            "required": ["todos"]
+        }
+    },
+    {
+        "name": "task", 
+        "description": "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"description": {"type": "string"}},
+            "required": ["description"]
+        }
+    },
+    # s07: skill tool (catalog is already in SYSTEM prompt, this loads full content)
+    {
+        "name": "load_skill", 
+        "description": "Load the full content of a skill by name.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"]
+        }
+    },
+    # s08 change: new compact tool — triggers compact_history, not a no-op
+    {
+        "name": "compact", 
+        "description": "Summarize earlier conversation to free context space.",
+        "input_schema": {
+            "type": "object", 
+            "properties": {"focus": {"type": "string"}}
+        }
+    },
+]
+
+# 映射，工具分发
+TOOL_HANDLERS = {
+    "bash": run_bash, "read_file": run_read, "write_file": run_write,
+    "edit_file": run_edit, "glob": run_glob,"todo_write": run_todo_write,
+    "task": spawn_subagent, "load_skill": load_skill,
 }
 
 # ═══════════════════════════════════════════════════════════
@@ -419,229 +671,6 @@ register_hook("PreToolUse", permission_hook)    # permission_hook（先注册，
 register_hook("PreToolUse", log_hook)   # log_hook（后注册，后执行）
 register_hook("PostToolUse", large_output_hook)
 register_hook("Stop", summary_hook)
-
-# 提取纯文本
-def extract_text(content) -> str:
-    """Extract text from message content blocks."""
-    if not isinstance(content, list):
-        return str(content)
-    return "\n".join(getattr(b, "text", "") for b in content if getattr(b, "type", None) == "text")
-
-# 子代理
-def spawn_subagent(description: str) -> str:
-    """Spawn a subagent with fresh messages[], return summary only."""
-    # 子 Agent 的工具SUB_TOOLS：基础工具，但没有 task（禁止递归）
-    print(f"\n\033[35m[Subagent spawned]\033[0m")
-    # 上下文隔离，子代理启动时，主代理只传给它一句 description（任务描述）
-    messages = [{"role": "user", "content": description}]  # fresh context
-
-    for _ in range(30):  # safety limit
-        response = client.messages.create(
-            model=MODEL, system=SUB_SYSTEM,
-            messages=messages, tools=SUB_TOOLS, max_tokens=8000,
-        )
-        messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
-            break
-        results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                # Issue 1: subagent also runs hooks (permissions apply)
-                blocked = trigger_hooks("PreToolUse", block)
-                if blocked:
-                    results.append({"type": "tool_result", "tool_use_id": block.id,
-                                    "content": str(blocked)})
-                    continue
-                handler = SUB_HANDLERS.get(block.name)
-                output = handler(**block.input) if handler else f"Unknown: {block.name}"
-                trigger_hooks("PostToolUse", block, output)
-                # 日志会被压缩，且加上 [sub] 前缀
-                print(f"  \033[90m[sub] {block.name}: {str(output)[:100]}\033[0m")
-                results.append({"type": "tool_result", "tool_use_id": block.id,
-                                "content": output})
-        messages.append({"role": "user", "content": results})
-
-    # Issue 5: fallback if safety limit hit during tool_use
-    result = extract_text(messages[-1]["content"])
-    # 如果子代理跑满了循环还没结束，代码会从后往前遍历历史记录，努力寻找最后一段 assistant 的文字回复
-    if not result:
-        # last message is tool_result, look backwards for assistant text
-        for msg in reversed(messages):
-            if msg["role"] == "assistant":
-                result = extract_text(msg["content"])
-                if result:
-                    break
-        # 无结果则返回提示
-        if not result:
-            result = "Subagent stopped after 30 turns without final answer."
-    print(f"\033[35m[Subagent done]\033[0m")
-    return result  # only summary, entire message history discarded
-
-
-#NEW in s08: Four-Layer Compaction Pipeline
-# ═══════════════════════════════════════════════════════════
-CONTEXT_LIMIT = 50000   # 上下文限制
-KEEP_RECENT = 3     # 保留最近x轮对话
-PERSIST_THRESHOLD = 30000   # 持久化阈值
-
-def estimate_size(msgs): return len(str(msgs))  # 估算消息大小
-
-def _block_type(block):
-    # 如果 block 是字典，则返回它 “type” 键的值，否则获取内容块类型
-    return block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
-
-
-def _message_has_tool_use(msg):
-    # 检查消息是否包含工具使用
-    if msg.get("role") != "assistant":
-        return False
-    content = msg.get("content")
-    if not isinstance(content, list):
-        return False
-    # 意一个块的类型是 tool_use，则True
-    return any(_block_type(block) == "tool_use" for block in content)
-
-
-def _is_tool_result_message(msg):
-    # 检查消息是否包含工具结果
-    if msg.get("role") != "user":
-        return False
-    content = msg.get("content")
-    if not isinstance(content, list):
-        return False
-    return any(isinstance(block, dict) and block.get("type") == "tool_result"
-               for block in content)
-
-
-# L1: snipCompact — 裁剪中间消息
-def snip_compact(messages, max_messages=50):
-    if len(messages) <= max_messages: return messages
-    keep_head, keep_tail = 3, max_messages - 3  # 计划头、尾部消息数量
-    # 确定头部保留区的结束索引和尾部保留区的开始索引
-    head_end, tail_start = keep_head, len(messages) - keep_tail
-    # 如果头部最后一条消息包含了工具调用（避免与工具结果拆散）
-    if head_end > 0 and _message_has_tool_use(messages[head_end - 1]):
-        while head_end < len(messages) and _is_tool_result_message(messages[head_end]):
-            head_end += 1   # 扩展头部边界，直至工具结果齐了
-    # 尾部起始索引有效 + 尾部第一条消息是工具结果
-    if (tail_start > 0 and tail_start < len(messages)
-            and _is_tool_result_message(messages[tail_start])
-            and _message_has_tool_use(messages[tail_start - 1])):
-        tail_start -= 1 # 索引向前移
-    if head_end >= tail_start:
-        # 头部和尾部重叠，直接返回原消息
-        return messages
-    snipped = tail_start - head_end # 计算被裁剪掉的消息数量
-    return messages[:head_end] + [{"role": "user", "content": f"[snipped {snipped} messages]"}] + messages[tail_start:]
-
-
-# L2: microCompact — 旧结果占位替换
-# 辅助函数
-def collect_tool_results(messages):
-    blocks = []
-    for mi, msg in enumerate(messages):
-        # 不是user的消息则跳过，不是列表的content也跳过
-        if msg.get("role") != "user" or not isinstance(msg.get("content"), list): 
-            continue
-        # 遍历消息内容块
-        for bi, block in enumerate(msg["content"]):
-            # 收集历史消息中的工具结果块
-            if isinstance(block, dict) and block.get("type") == "tool_result":
-                blocks.append((mi, bi, block))
-    return blocks
-
-# 第二层压缩主函数
-def micro_compact(messages):
-    tool_results = collect_tool_results(messages)   # 收集工具结果
-    if len(tool_results) <= KEEP_RECENT:    # 结果总数不超过x个
-        return messages
-    for _, _, block in tool_results[:-KEEP_RECENT]:
-        if len(block.get("content", "")) > 120:
-            # 内容长度超了，则将直接替换为提示语
-            block["content"] = "[Earlier tool result compacted. Re-run if needed.]"
-    return messages
-
-
-# L3: toolResultBudget — 持久化大输出到磁盘
-# 辅助函数
-def persist_large_output(tool_use_id, output):
-    if len(output) <= PERSIST_THRESHOLD:    # 长度小于等于阈值 直接返回
-        return output
-    TOOL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    path = TOOL_RESULTS_DIR / f"{tool_use_id}.txt"  # 构建保存路径
-    if not path.exists(): path.write_text(output)
-    # 返回一个精简的 XML 格式提示给大模型，包含完整输出的文件路径和预览
-    return f"<persisted-output>\nFull output: {path}\nPreview:\n{output[:2000]}\n</persisted-output>"
-
-# 第三层压缩主函数
-def tool_result_budget(messages, max_bytes=200_000):
-    last = messages[-1] if messages else None   # 获取最后一条消息
-    # 不符合要求 直接返回
-    if not last or last.get("role") != "user" or not isinstance(last.get("content"), list): return messages
-    # 提取最后一条消息中的所有工具结果块及其索引
-    blocks = [(i, b) for i, b in enumerate(last["content"]) if isinstance(b, dict) and b.get("type") == "tool_result"]
-    total = sum(len(str(b.get("content", ""))) for _, b in blocks)  # 计算所有工具结果块内容的总长度
-    if total <= max_bytes: # 总大小没有超过预算，返回 结束
-        return messages
-    # 排序
-    ranked = sorted(blocks, key=lambda p: len(str(p[1].get("content", ""))), reverse=True)
-    for _, block in ranked:
-        if total <= max_bytes: break
-        content = str(block.get("content", ""))
-        if len(content) <= PERSIST_THRESHOLD: continue
-        tid = block.get("tool_use_id", "unknown")
-        # 持久化替换
-        block["content"] = persist_large_output(tid, content)
-        # 重新计算，判断大小是否满足预算
-        total = sum(len(str(b.get("content", ""))) for _, b in blocks)
-    return messages
-
-
-# L4: autoCompact — LLM full summary
-def write_transcript(messages):
-    TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
-    path = TRANSCRIPT_DIR / f"transcript_{int(time.time())}.jsonl"
-    with path.open("w") as f:
-        for msg in messages: f.write(json.dumps(msg, default=str) + "\n")
-    return path
-
-def summarize_history(messages):
-    conversation = json.dumps(messages, default=str)[:80000]
-    prompt = ("Summarize this coding-agent conversation so work can continue.\n"
-              "Preserve: 1. current goal, 2. key findings/decisions, 3. files read/changed, "
-              "4. remaining work, 5. user constraints.\nBe compact but concrete.\n\n" + conversation)
-    response = client.messages.create(model=MODEL, messages=[{"role": "user", "content": prompt}], max_tokens=2000)
-    return "\n".join(
-        getattr(block, "text", "")
-        for block in response.content
-        if getattr(block, "type", None) == "text").strip() or "(empty summary)"
-
-def compact_history(messages):
-    transcript_path = write_transcript(messages)
-    print(f"[transcript saved: {transcript_path}]")
-    summary = summarize_history(messages)
-    return [{"role": "user", "content": f"[Compacted]\n\n{summary}"}]
-
-
-# Emergency: reactiveCompact — on API error
-def reactive_compact(messages):
-    transcript = write_transcript(messages)
-    summary = summarize_history(messages)
-    tail_start = max(0, len(messages) - 5)
-    if (tail_start > 0 and tail_start < len(messages)
-            and _is_tool_result_message(messages[tail_start])
-            and _message_has_tool_use(messages[tail_start - 1])):
-        tail_start -= 1
-    return [{"role": "user", "content": f"[Reactive compact]\n\n{summary}"}, *messages[tail_start:]]
-
-# 挂载到主代理
-TOOLS.append({
-    "name": "task",
-    "description": "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
-    "input_schema": {"type": "object", "properties": {"description": {"type": "string"}}, "required": ["description"]},
-})
-# 把 spawn_subagent 包装成一个名叫 task 的普通工具，注册给主代理
-TOOL_HANDLERS["task"] = spawn_subagent
 
 # ── s04 + nag reminder counter ──
 

@@ -80,109 +80,12 @@ def build_system() -> str:
 
 SYSTEM = build_system()
 
-# s06: subagent gets its own system prompt — no task, no recursion
+# s07: subagent gets its own system prompt — no skill loading, no task
 SUB_SYSTEM = (
     f"You are a coding agent at {WORKDIR}. "
     "Complete the task you were given, then return a concise summary. "
     "Do not delegate further."
 )
-
-# ═══════════════════════════════════════════════════════════
-#  NEW in s07: load_skill — 安全的延迟加载
-# ═══════════════════════════════════════════════════════════
-
-def load_skill(name: str) -> str:
-    """Load full skill content. Lookup via registry — no path traversal."""
-    skill = SKILL_REGISTRY.get(name)
-    if not skill:
-        return f"Skill not found: {name}"
-    return skill["content"]
-
-# ── Tool definition: 工具定义 ────────────────────────────
-TOOLS = [
-    {
-        "name": "bash",
-        "description": "Run a shell command.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"command": {"type": "string"}},
-            "required": ["command"],
-            },
-        },
-    {
-        "name": "read_file", 
-        "description": "Read file contents.",
-        # 定义了输入参数的结构
-        "input_schema": {
-            "type": "object",   # 输入参数是一个 JSON 对象
-            "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, 
-            "required": ["path"]    # 列出哪些参数是必填
-            }
-        },
-    {
-        "name": "write_file", 
-        "description": "Write content to a file.",
-        "input_schema": {
-            "type": "object", 
-            "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, 
-            "required": ["path", "content"]
-            }
-        },
-    {
-        "name": "edit_file", 
-        "description": "Replace exact text in a file once.",
-        "input_schema": {
-            "type": "object", 
-            "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, 
-            "required": ["path", "old_text", "new_text"]
-            }
-        },
-    {
-        "name": "glob", 
-        "description": "Find files matching a glob pattern.",
-        "input_schema": {
-            "type": "object", 
-            "properties": {"pattern": {"type": "string"}}, 
-            "required": ["pattern"]
-            }
-        },
-    # s05: new tool
-    {
-        "name": "todo_write", 
-        "description": "Create and manage a task list for your current coding session.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "todos": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "content": {"type": "string"},
-                            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
-                        },
-                        "required": ["content", "status"]
-                    }
-                }
-            },
-            "required": ["todos"]
-        }
-    },
-]
-
-#  NEW in s06: Subagent — fresh messages[], summary only. NO "task" tool
-SUB_TOOLS = [
-    {"name": "bash", "description": "Run a shell command.",
-     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-    {"name": "read_file", "description": "Read file contents.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
-    {"name": "write_file", "description": "Write content to a file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
-    {"name": "edit_file", "description": "Replace exact text in a file once.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
-    {"name": "glob", "description": "Find files matching a glob pattern.",
-     "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
-]
 
 # ── Tool execution ────────────────────────────────────────
 def run_bash(command: str) -> str:
@@ -307,23 +210,31 @@ def run_todo_write(todos: list) -> str:
     # 返回给大模型 确认信息
     return f"Updated {len(CURRENT_TODOS)} tasks"
 
-# 映射，工具分发
-TOOL_HANDLERS = {
-    "bash": run_bash, "read_file": run_read, "write_file": run_write,
-    "edit_file": run_edit, "glob": run_glob,"todo_write": run_todo_write,
-}
-
-SUB_HANDLERS = {
-    "bash": run_bash, "read_file": run_read, "write_file": run_write,
-    "edit_file": run_edit, "glob": run_glob,
-}
-
 # 提取纯文本
 def extract_text(content) -> str:
     """Extract text from message content blocks."""
     if not isinstance(content, list):
         return str(content)
     return "\n".join(getattr(b, "text", "") for b in content if getattr(b, "type", None) == "text")
+
+#  NEW in s06: Subagent — fresh messages[], summary only. NO "task" tool
+SUB_TOOLS = [
+    {"name": "bash", "description": "Run a shell command.",
+     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
+    {"name": "read_file", "description": "Read file contents.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
+    {"name": "write_file", "description": "Write content to a file.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
+    {"name": "edit_file", "description": "Replace exact text in a file once.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
+    {"name": "glob", "description": "Find files matching a glob pattern.",
+     "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
+]
+
+SUB_HANDLERS = {
+    "bash": run_bash, "read_file": run_read, "write_file": run_write,
+    "edit_file": run_edit, "glob": run_glob,
+}
 
 # 子代理
 def spawn_subagent(description: str) -> str:
@@ -375,14 +286,122 @@ def spawn_subagent(description: str) -> str:
     print(f"\033[35m[Subagent done]\033[0m")
     return result  # only summary, entire message history discarded
 
-# 挂载到主代理
-TOOLS.append({
-    "name": "task",
-    "description": "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
-    "input_schema": {"type": "object", "properties": {"description": {"type": "string"}}, "required": ["description"]},
-})
-# 把 spawn_subagent 包装成一个名叫 task 的普通工具，注册给主代理
-TOOL_HANDLERS["task"] = spawn_subagent
+# ═══════════════════════════════════════════════════════════
+#  NEW in s07: load_skill — 安全的延迟加载
+# ═══════════════════════════════════════════════════════════
+
+def load_skill(name: str) -> str:
+    """Load full skill content. Lookup via registry — no path traversal."""
+    skill = SKILL_REGISTRY.get(name)
+    if not skill:
+        return f"Skill not found: {name}"
+    return skill["content"]
+
+# ── Tool definition: 工具定义 ────────────────────────────
+TOOLS = [
+    {
+        "name": "bash",
+        "description": "Run a shell command.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+            },
+        },
+    {
+        "name": "read_file", 
+        "description": "Read file contents.",
+        # 定义了输入参数的结构
+        "input_schema": {
+            "type": "object",   # 输入参数是一个 JSON 对象
+            "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, 
+            "required": ["path"]    # 列出哪些参数是必填
+            }
+        },
+    {
+        "name": "write_file", 
+        "description": "Write content to a file.",
+        "input_schema": {
+            "type": "object", 
+            "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, 
+            "required": ["path", "content"]
+            }
+        },
+    {
+        "name": "edit_file", 
+        "description": "Replace exact text in a file once.",
+        "input_schema": {
+            "type": "object", 
+            "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, 
+            "required": ["path", "old_text", "new_text"]
+            }
+        },
+    {
+        "name": "glob", 
+        "description": "Find files matching a glob pattern.",
+        "input_schema": {
+            "type": "object", 
+            "properties": {"pattern": {"type": "string"}}, 
+            "required": ["pattern"]
+            }
+        },
+    # s05: new tool
+    {
+        "name": "todo_write", 
+        "description": "Create and manage a task list for your current coding session.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string"},
+                            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
+                        },
+                        "required": ["content", "status"]
+                    }
+                }
+            },
+            "required": ["todos"]
+        }
+    },
+    {
+        "name": "task", 
+        "description": "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"description": {"type": "string"}},
+            "required": ["description"]
+        }
+    },
+    # s07: skill tool (catalog is already in SYSTEM prompt, this loads full content)
+    {
+        "name": "load_skill", 
+        "description": "Load the full content of a skill by name.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"]
+        }
+    },
+]
+
+# 映射，工具分发
+TOOL_HANDLERS = {
+    "bash": run_bash, "read_file": run_read, "write_file": run_write,
+    "edit_file": run_edit, "glob": run_glob,"todo_write": run_todo_write,
+    "task": spawn_subagent, "load_skill": load_skill,
+}
+# # 挂载到主代理
+# TOOLS.append({
+#     "name": "task",
+#     "description": "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
+#     "input_schema": {"type": "object", "properties": {"description": {"type": "string"}}, "required": ["description"]},
+# })
+# # 把 spawn_subagent 包装成一个名叫 task 的普通工具，注册给主代理
+# TOOL_HANDLERS["task"] = spawn_subagent
 
 # ═══════════════════════════════════════════════════════════
 #  NEW in s04: Hook System
