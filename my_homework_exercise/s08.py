@@ -1,5 +1,5 @@
 '''
-重点章节，484～
+重点章节
 '''
 import os, ast, json, yaml, time
 import subprocess
@@ -675,22 +675,45 @@ register_hook("Stop", summary_hook)
 # ── s04 + nag reminder counter ──
 
 rounds_since_todo = 0
+MAX_REACTIVE_RETRIES = 1  # 最大反应式压缩重试次数
 
 def agent_loop(messages: list):
     global rounds_since_todo
+    reactive_retries = 0    # 压缩的重试计数器
     while True:
+        # s08 change: 三个预处理器,不消耗 API 调用
+        # 顺序匹配 Claude Code 源码：预算裁剪 -> 中间裁剪 -> 微缩占位
+        messages[:] = tool_result_budget(messages)    # L3: 持久化大输出到硬盘
+        messages[:] = snip_compact(messages)          # L1: 裁剪中间冗余消息
+        messages[:] = micro_compact(messages)         # L2: 旧工具结果替换为占位符
+
+        # s08 change: 依然超过阈值 -> 调用大模型进行总结 (1 API call)
+        if estimate_size(messages) > CONTEXT_LIMIT:
+            print("[auto compact]")
+            messages[:] = compact_history(messages)
+
         # 模型连续 3 轮没调 todo_write 时，自动注入一条提醒
         if rounds_since_todo >= 3 and messages:
             messages.append({
                 "role": "user",
                 "content": "<reminder>Update your todos.</reminder>",
             })
-        rounds_since_todo = 0
+            rounds_since_todo = 0
 
-        response = client.messages.create(
-            model=MODEL, system=SYSTEM, messages=messages,
-            tools=TOOLS, max_tokens=8000,
-        )
+        try:
+            response = client.messages.create(
+                model=MODEL, system=SYSTEM, messages=messages,
+                tools=TOOLS, max_tokens=8000,
+            )
+            reactive_retries = 0  # API 调用成功，重置重试计数
+        except Exception as e:
+            err_str = str(e).lower()
+            if ("prompt_too_long" in err_str or "too many tokens" in err_str) and reactive_retries < MAX_REACTIVE_RETRIES:
+                print("[reactive compact]")
+                messages[:] = reactive_compact(messages)    # 调用紧急反应式压缩函数
+                reactive_retries += 1
+                continue
+            raise  # 如果不是长度问题或重试次数用尽，抛出异常
 
         # Append assistant turn 追加回复response.content至历史消息列表
         messages.append({"role": "assistant", "content": response.content})
@@ -711,6 +734,19 @@ def agent_loop(messages: list):
         for block in response.content:
             if block.type != "tool_use":
                 continue
+            print(f"\033[36m> {block.name}\033[0m")
+
+            # 特殊工具：compact (大模型主动要求压缩)
+            if block.name == "compact":
+                messages[:] = compact_history(messages) # 调用L4
+                results.append({"type": "tool_result", "tool_use_id": block.id,
+                                "content": "[Compacted. Conversation history has been summarized.]"})
+                messages.append({"role": "user", "content": results})
+                break  # 结束当前循环，带着压缩后的上下文重新开始
+            
+            # 特殊工具：todo_write (重置提醒计数器)
+            if block.name == "todo_write":
+                rounds_since_todo = 0
 
             blocked = trigger_hooks("PreToolUse", block)
             if blocked:
@@ -728,11 +764,17 @@ def agent_loop(messages: list):
             results.append({
                 "type": "tool_result",      # 工具执行结果
                 "tool_use_id": block.id,
-                "content": output,      # 工具执行的实际返回
+                "content": str(output),      # 工具执行的实际返回
             })
 
-        # Feed tool results back, loop continues 将工具结果反馈，循环继续
-        messages.append({"role": "user", "content": results})
+        else:
+            # 正常路径：没有触发 compact 的 break，把所有结果追加进去
+            # Feed tool results back, loop continues 将工具结果反馈，循环继续
+            messages.append({"role": "user", "content": results})
+            continue
+        
+        # 如果触发了 compact (通过 break 跳出)，直接进入下一轮循环
+        continue
 
 
 # ── Entry point ──────────────────────────────────────────

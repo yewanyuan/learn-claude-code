@@ -436,7 +436,7 @@ def agent_loop(messages: list):
                 "role": "user",
                 "content": "<reminder>Update your todos.</reminder>",
             })
-        rounds_since_todo = 0
+            rounds_since_todo = 0
 
         response = client.messages.create(
             model=MODEL, system=SYSTEM, messages=messages,
